@@ -91,19 +91,46 @@
 
     - name: 14. Install Leapp framework and AlmaLinux 10 migration data
       ansible.builtin.dnf:
-        name: "leapp-upgrade,leapp-data-almalinux"
+        name:
+          - leapp
+          - python3-leapp
+          - leapp-upgrade
+          - leapp-data-almalinux
         state: latest
         allowerasing: true
         update_cache: true
       when: ansible_distribution_major_version == '9'
 
-    - name: 15. Wipe all legacy ifcfg files from the network-scripts directory
+    - name: 15. Dynamically discover all non-active kernels
       ansible.builtin.shell: |
-        rm -f /etc/sysconfig/network-scripts/ifcfg-*
-        nmcli connection reload
+        rpm -q kernel kernel-core kernel-modules kernel-devel | grep -v "$(uname -r)" || true
+      register: old_kernels_detected
+      changed_when: false
       when: ansible_distribution_major_version == '9'
 
-    - name: 16. Purge alternative answerfile and generate clean automation responses
+    - name: 16. Purge discovered kernel remnants dynamically
+      ansible.builtin.dnf:
+        name: "{{ old_kernels_detected.stdout_lines }}"
+        state: absent
+      when: 
+        - ansible_distribution_major_version == '9'
+        - old_kernels_detected.stdout | length > 0
+
+    - name: 17. Dynamically remove custom python and stale leapp modules
+      ansible.builtin.dnf:
+        name: 
+          - "custom-python*"
+          - "lua-posix"
+        state: absent
+      when: ansible_distribution_major_version == '9'
+
+    - name: 18. Purge any corrupted automated answerfile profiles
+      ansible.builtin.file:
+        path: /var/log/leapp/answerfile
+        state: absent
+      when: ansible_distribution_major_version == '9'
+
+    - name: 19. Initialize clean answerfile template with explicit section headers
       ansible.builtin.copy:
         content: |
           [remove_pam_userdb]
@@ -115,53 +142,26 @@
         mode: '0600'
       when: ansible_distribution_major_version == '9'
 
-    - name: 17. Fix Leapp Network Inhibitor by mapping predictable interface rules
+    - name: 20. Ensure predictable interface naming is active for Leapp
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/udev/rules.d/80-net-setup-link.rules
+        - /etc/udev/rules.d/70-persistent-net.rules
+
+    - name: 21. Wipe all legacy ifcfg files to prevent network inhibitor failures
       ansible.builtin.shell: |
-        ln -s /dev/null /etc/udev/rules.d/80-net-setup-link.rules || true
-        echo 'ACTION=="add", SUBSYSTEM=="net", ATTR{address}=="08:00:27:*", NAME="eth0"' > /etc/udev/rules.d/70-persistent-net.rules
+        rm -f /etc/sysconfig/network-scripts/ifcfg-*
+        nmcli connection reload
       when: ansible_distribution_major_version == '9'
 
-    - name: 18. Force reboot to apply the new active kernel structures
+    - name: 22. Force reboot to apply the new active kernel structures
       ansible.builtin.reboot:
         reboot_timeout: 300
       when: ansible_distribution_major_version == '9'
 
-    - name: 18b. Dynamically discover all non-active kernels
-      ansible.builtin.shell: |
-        rpm -q kernel kernel-core kernel-modules kernel-devel | grep -v "$(uname -r)" || true
-      register: old_kernels_detected
-      changed_when: false
-      when: ansible_distribution_major_version == '9'
-
-    - name: 18c. Purge discovered kernel remnants dynamically
-      ansible.builtin.dnf:
-        name: "{{ old_kernels_detected.stdout_lines }}"
-        state: absent
-      when: 
-        - ansible_distribution_major_version == '9'
-        - old_kernels_detected.stdout | length > 0
-
-    - name: 18d. Dynamically remove custom python and stale leapp modules
-      ansible.builtin.dnf:
-        name: 
-          - "custom-python*"
-          - "leapp-deps-*"
-          - "leapp-repository-deps-*"
-          - "lua-posix"
-        state: absent
-        allowerasing: true
-      when: ansible_distribution_major_version == '9'
-
-    - name: 18e. Authorize Berkeley DB (libdb) deprecation bypass flags
-      ansible.builtin.lineinfile:
-        path: /var/log/leapp/answerfile
-        regexp: '^#?\s*\[remove_pam_userdb\]'
-        insertafter: '^#?\s*\[remove_pam_userdb\]'
-        line: 'confirm = true'
-      when: ansible_distribution_major_version == '9'
-
-
-    - name: 19. Run Leapp pre-upgrade analysis
+    - name: 23. Run Leapp pre-upgrade analysis
       ansible.builtin.command: leapp preupgrade --no-rhsm
       register: preupgrade_result
       environment:
@@ -169,7 +169,7 @@
       failed_when: false
       when: ansible_distribution_major_version == '9'
 
-    - name: 20. Check if pre-upgrade failed due to critical inhibitors
+    - name: 24. Check if pre-upgrade failed due to critical inhibitors
       ansible.builtin.fail:
         msg: >
           Leapp pre-upgrade failed. 
@@ -184,7 +184,7 @@
           'inhibitor' in (preupgrade_result.stderr | default('')) or 
           preupgrade_result.rc == 127
 
-    - name: 21. Execute the actual OS upgrade process
+    - name: 25. Execute the actual OS upgrade process
       ansible.builtin.command: leapp upgrade
       register: upgrade_result
       async: 1800
@@ -193,14 +193,26 @@
         PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
       when: ansible_distribution_major_version == '9'
 
-    - name: 22. Trigger the ELevate migration reboot asynchronously
+    - name: 26. Trigger the ELevate migration reboot asynchronously
       ansible.builtin.shell: sleep 5 && reboot
       async: 1
       poll: 0
       when: ansible_distribution_major_version == '9'
 
-    - name: 23. Wait for the AlmaLinux 10 package upgrade to finish completely
+    - name: 27. Wait for the AlmaLinux 10 package upgrade to finish completely
       ansible.builtin.wait_for_connection:
         delay: 60
-        timeout: 2700  # Extended to 45 minutes to accommodate slow VM disk speeds
+        timeout: 2700
       when: ansible_distribution_major_version == '9'
+
+    - name: 28. Post-Upgrade System Validation
+      block:
+        - name: 28a. Force Ansible to refresh system information
+          ansible.builtin.setup:
+
+        - name: 28b. Validate that the system has successfully upgraded to major version 10
+          ansible.builtin.assert:
+            that:
+              - ansible_distribution_major_version == '10'
+            fail_msg: "System upgrade verification failed! System is not running version 10."
+            success_msg: "Perfect! System has been verified running AlmaLinux 10."
