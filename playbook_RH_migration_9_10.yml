@@ -4,7 +4,7 @@
   become: true
 
   tasks: 
-    - name: 1. Force remove old corrupted repository files from the remote system
+    - name: 1. Force remove old corrupted repository and cache assets
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -13,30 +13,30 @@
         - /var/cache/dnf
         - /tmp/elevate-release.rpm
 
-    - name: 2. Run a full system update to latest packages via shell (Bypasses Python 3.6 conflict)
+    - name: 2. Run a full system update to latest packages
       ansible.builtin.shell: "yum update -y"
       register: dnf_update
       changed_when: "'Nothing to do' not in dnf_update.stdout"
       when: ansible_distribution_major_version == '9'
 
-    - name: 3. Stage the network migration script to the remote machine
+    - name: 3. Stage the network migration script
       ansible.builtin.copy:
-        src: ./network_name_migration.sh
+        src: "network_name_migration.sh"
         dest: /tmp/network_name_migration.sh
-        mode: '0755'
+        mode: "0755"
 
-    - name: 4. Migrate legacy network interfaces (eth*) configuration to NetworkManager asynchronously
+    - name: 4. Migrate legacy network interfaces to NetworkManager asynchronously
       ansible.builtin.shell: /bin/bash /tmp/network_name_migration.sh
       async: 120
       poll: 0
       register: network_migration_async
 
-    - name: 5. Wait for the network connection to recover after migration script execution
+    - name: 5. Wait for the network connection to recover
       ansible.builtin.wait_for_connection:
         delay: 5
         timeout: 90
 
-    - name: 6. Remove the temporary migration script from remote machine
+    - name: 6. Remove the temporary migration script
       ansible.builtin.file:
         path: /tmp/network_name_migration.sh
         state: absent
@@ -46,7 +46,7 @@
         reboot_timeout: 300
       when: dnf_update.changed
 
-    - name: 8. Comment synced vagrant local project directory
+    - name: 8. Comment synced vagrant local project directory out of fstab
       ansible.builtin.lineinfile:
         path: /etc/fstab
         regexp: '^#?(\s*vagrant\s+/vagrant\s+vboxsf.*)'
@@ -83,14 +83,10 @@
         state: absent
       when: ansible_distribution_major_version == '9'
 
-    - name: 13a. Clean DNF cache on host
-      ansible.builtin.command: dnf clean all
-      when: ansible_distribution_major_version == '9'
-
-    - name: 13b. Remove remaining DNF cache directory
-      ansible.builtin.file:
-        path: /var/cache/dnf
-        state: absent
+    - name: 13. Clean DNF cache and purge cache directory
+      ansible.builtin.shell: |
+        dnf clean all
+        rm -rf /var/cache/dnf
       when: ansible_distribution_major_version == '9'
 
     - name: 14. Install Leapp framework and AlmaLinux 10 migration data
@@ -101,24 +97,71 @@
         update_cache: true
       when: ansible_distribution_major_version == '9'
 
-    - name: 15. Fix Leapp Network Inhibitor by mapping predictable interface rules
+    - name: 15. Wipe all legacy ifcfg files from the network-scripts directory
+      ansible.builtin.shell: |
+        rm -f /etc/sysconfig/network-scripts/ifcfg-*
+        nmcli connection reload
+      when: ansible_distribution_major_version == '9'
+
+    - name: 16. Purge alternative answerfile and generate clean automation responses
+      ansible.builtin.copy:
+        content: |
+          [remove_pam_userdb]
+          confirm = true
+
+          [check_vdo]
+          confirm = true
+        dest: /var/log/leapp/answerfile
+        mode: '0600'
+      when: ansible_distribution_major_version == '9'
+
+    - name: 17. Fix Leapp Network Inhibitor by mapping predictable interface rules
       ansible.builtin.shell: |
         ln -s /dev/null /etc/udev/rules.d/80-net-setup-link.rules || true
         echo 'ACTION=="add", SUBSYSTEM=="net", ATTR{address}=="08:00:27:*", NAME="eth0"' > /etc/udev/rules.d/70-persistent-net.rules
       when: ansible_distribution_major_version == '9'
 
-    - name: 16. Force reboot to apply the new kernel installed by the shell script
+    - name: 18. Force reboot to apply the new active kernel structures
       ansible.builtin.reboot:
         reboot_timeout: 300
       when: ansible_distribution_major_version == '9'
 
-    - name: 17. Pre-confirm the VDO check required by Leapp
-      ansible.builtin.command: leapp answer --section check_vdo.confirm=True
-      environment:
-        PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
+    - name: 18b. Dynamically discover all non-active kernels
+      ansible.builtin.shell: |
+        rpm -q kernel kernel-core kernel-modules kernel-devel | grep -v "$(uname -r)" || true
+      register: old_kernels_detected
+      changed_when: false
       when: ansible_distribution_major_version == '9'
 
-    - name: 18. Run Leapp pre-upgrade analysis
+    - name: 18c. Purge discovered kernel remnants dynamically
+      ansible.builtin.dnf:
+        name: "{{ old_kernels_detected.stdout_lines }}"
+        state: absent
+      when: 
+        - ansible_distribution_major_version == '9'
+        - old_kernels_detected.stdout | length > 0
+
+    - name: 18d. Dynamically remove custom python and stale leapp modules
+      ansible.builtin.dnf:
+        name: 
+          - "custom-python*"
+          - "leapp-deps-*"
+          - "leapp-repository-deps-*"
+          - "lua-posix"
+        state: absent
+        allowerasing: true
+      when: ansible_distribution_major_version == '9'
+
+    - name: 18e. Authorize Berkeley DB (libdb) deprecation bypass flags
+      ansible.builtin.lineinfile:
+        path: /var/log/leapp/answerfile
+        regexp: '^#?\s*\[remove_pam_userdb\]'
+        insertafter: '^#?\s*\[remove_pam_userdb\]'
+        line: 'confirm = true'
+      when: ansible_distribution_major_version == '9'
+
+
+    - name: 19. Run Leapp pre-upgrade analysis
       ansible.builtin.command: leapp preupgrade --no-rhsm
       register: preupgrade_result
       environment:
@@ -126,7 +169,7 @@
       failed_when: false
       when: ansible_distribution_major_version == '9'
 
-    - name: 19 Check if pre-upgrade failed due to critical inhibitors
+    - name: 20. Check if pre-upgrade failed due to critical inhibitors
       ansible.builtin.fail:
         msg: >
           Leapp pre-upgrade failed. 
@@ -141,30 +184,22 @@
           'inhibitor' in (preupgrade_result.stderr | default('')) or 
           preupgrade_result.rc == 127
 
-    - name: 20. Forcefully remove lingering ifcfg files to satisfy Leapp
-      ansible.builtin.file:
-        path: /etc/sysconfig/network-scripts/ifcfg-eth1
-        state: absent
-
-    - name: 21. Force NetworkManager to clear cached ifcfg references
-      ansible.builtin.systemd:
-        name: NetworkManager
-        state: reloaded
-
-    - name: 22. Execute the actual OS upgrade process
+    - name: 21. Execute the actual OS upgrade process
       ansible.builtin.command: leapp upgrade
       register: upgrade_result
+      async: 1800
+      poll: 10
       environment:
         PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
       when: ansible_distribution_major_version == '9'
 
-    - name: 23. Trigger the ELevate migration reboot asynchronously
+    - name: 22. Trigger the ELevate migration reboot asynchronously
       ansible.builtin.shell: sleep 5 && reboot
       async: 1
       poll: 0
       when: ansible_distribution_major_version == '9'
 
-    - name: 24. Wait for the AlmaLinux 9 package upgrade to finish completely
+    - name: 23. Wait for the AlmaLinux 10 package upgrade to finish completely
       ansible.builtin.wait_for_connection:
         delay: 60
         timeout: 2700  # Extended to 45 minutes to accommodate slow VM disk speeds

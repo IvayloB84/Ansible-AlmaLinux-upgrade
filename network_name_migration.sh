@@ -96,6 +96,12 @@ done < <(ip -brief link show)
 echo "Applying new connection profiles..."
 nmcli connection reload
 
+echo "Cleaning up legacy ifcfg files..."
+if [ -d "/etc/sysconfig/network-scripts" ]; then
+    # Delete or move the old ifcfg files so Leapp passes its verification check
+    rm -f /etc/sysconfig/network-scripts/ifcfg-*
+fi
+
 # Check if any ifcfg files actually exist before trying to move them
 # if compgen -G "/etc/sysconfig/network-scripts/ifcfg-*" > /dev/null; then
 #     echo "Archiving old network scripts to /root/..."
