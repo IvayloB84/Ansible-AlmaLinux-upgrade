@@ -13,7 +13,7 @@
         - /var/cache/dnf
         - /tmp/elevate-release.rpm
 
-    - name: 2. Run a full system update to latest packages via shell (Bypasses Python 3.6 conflict)
+    - name: 2. Run a full system update to latest packages (Bypasses Python 3.6 conflict)
       ansible.builtin.shell: "yum update -y"
       register: dnf_update
       changed_when: "'Nothing to do' not in dnf_update.stdout"
@@ -66,7 +66,7 @@
       register: el8_repo
       when: ansible_distribution_major_version == '8'
 
-    - name: 11. Install Leapp framework and AlmaLinux migration data via shell
+    - name: 11. Install Leapp framework and AlmaLinux migration data
       ansible.builtin.shell: |
         dnf clean all
         rm -rf /var/cache/dnf
@@ -125,6 +125,8 @@
     - name: 18. Execute the actual OS upgrade process
       ansible.builtin.command: leapp upgrade
       register: upgrade_result
+      async: 1800            # Allow the task to run in the background for up to 30 minutes
+      poll: 10               # Check the status every 10 seconds
       environment:
         PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
       when: ansible_distribution_major_version == '8'
@@ -136,10 +138,10 @@
 
     - name: 20. Post-Upgrade System Validation
       block:
-        - name: 20.1 Force Ansible to refresh system information
+        - name: 20a Force Ansible to refresh system information
           ansible.builtin.setup:
 
-        - name: 20.2 Validate that the system has successfully upgraded to major version 9
+        - name: 20b Validate that the system has successfully upgraded to major version 9
           ansible.builtin.assert:
             that:
               - ansible_distribution == "AlmaLinux"

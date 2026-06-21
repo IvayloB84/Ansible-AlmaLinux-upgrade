@@ -102,10 +102,9 @@ if [ -d "/etc/sysconfig/network-scripts" ]; then
     rm -f /etc/sysconfig/network-scripts/ifcfg-*
 fi
 
-# Check if any ifcfg files actually exist before trying to move them
-# if compgen -G "/etc/sysconfig/network-scripts/ifcfg-*" > /dev/null; then
-#     echo "Archiving old network scripts to /root/..."
-#     mv /etc/sysconfig/network-scripts/ifcfg-* /root/
-# else
-#     echo "No old ifcfg-* files found to archive. Skipping and continuing..."
-# fi
+echo "Configuring python312 system mapping..."
+if [ -f "/usr/bin/python3.12" ]; then
+    ln -sf /usr/bin/python3.12 /usr/bin/python312
+else
+    echo "Warning: Native python3.12 binary not found at /usr/bin/python3.12"
+fi

@@ -48,6 +48,9 @@
         fi
     fi
 
+    ln -sf /usr/bin/python3.12 /usr/bin/python312
+    
     # Print final tool states
     gcc --version
     if command -v python3 >/dev/null 2>&1; then python3 --version; fi
+

@@ -184,14 +184,25 @@
           'inhibitor' in (preupgrade_result.stderr | default('')) or 
           preupgrade_result.rc == 127
 
-    - name: 25. Execute the actual OS upgrade process
+    - name: 25. Execute the actual OS upgrade process (Silenced background job)
       ansible.builtin.command: leapp upgrade
-      register: upgrade_result
+      register: upgrade_result_async
       async: 1800
-      poll: 10
+      poll: 0            # Setting this to 0 immediately silences the terminal spam
       environment:
         PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
       when: ansible_distribution_major_version == '9'
+
+    - name: 25b. Wait for the upgrade to finish silently in the background
+      ansible.builtin.async_status:
+        jid: "{{ upgrade_result_async.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 180       # 180 retries * 10 seconds delay = 30 minutes total timeout
+      delay: 10          # Check status every 10 seconds silently
+      when: 
+        - ansible_distribution_major_version == '9'
+        - upgrade_result_async.ansible_job_id is defined
 
     - name: 26. Trigger the ELevate migration reboot asynchronously
       ansible.builtin.shell: sleep 5 && reboot
