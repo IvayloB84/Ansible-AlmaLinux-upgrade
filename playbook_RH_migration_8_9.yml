@@ -41,6 +41,17 @@
         path: /tmp/network_name_migration.sh
         state: absent
 
+    - name: Remove legacy network naming flags from GRUB configuration
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '([\s"])(net\.ifnames=0|biosdevname=0)\s*'
+        replace: '\1'
+      register: grub_config_updated
+
+    - name: Regenerate GRUB bootloader menu if flags were modified
+      ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: grub_config_updated.changed
+
     - name: 7. Reboot if updates were installed
       ansible.builtin.reboot:
         reboot_timeout: 300

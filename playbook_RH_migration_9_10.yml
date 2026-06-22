@@ -13,217 +13,261 @@
         - /var/cache/dnf
         - /tmp/elevate-release.rpm
 
-    - name: 2. Run a full system update to latest packages
-      ansible.builtin.shell: "yum update -y"
-      register: dnf_update
-      changed_when: "'Nothing to do' not in dnf_update.stdout"
+    # =========================================================================
+    # MAIN ALMALINUX 9 TO 10 MIGRATION ENGINE
+    # =========================================================================
+    - name: Execute AlmaLinux 9 to 10 Migration Pipeline
       when: ansible_distribution_major_version == '9'
-
-    - name: 3. Stage the network migration script
-      ansible.builtin.copy:
-        src: "network_name_migration.sh"
-        dest: /tmp/network_name_migration.sh
-        mode: "0755"
-
-    - name: 4. Migrate legacy network interfaces to NetworkManager asynchronously
-      ansible.builtin.shell: /bin/bash /tmp/network_name_migration.sh
-      async: 120
-      poll: 0
-      register: network_migration_async
-
-    - name: 5. Wait for the network connection to recover
-      ansible.builtin.wait_for_connection:
-        delay: 5
-        timeout: 90
-
-    - name: 6. Remove the temporary migration script
-      ansible.builtin.file:
-        path: /tmp/network_name_migration.sh
-        state: absent
-
-    - name: 7. Reboot if updates were installed
-      ansible.builtin.reboot:
-        reboot_timeout: 300
-      when: dnf_update.changed
-
-    - name: 8. Comment synced vagrant local project directory out of fstab
-      ansible.builtin.lineinfile:
-        path: /etc/fstab
-        regexp: '^#?(\s*vagrant\s+/vagrant\s+vboxsf.*)'
-        line: '#\1'
-        backrefs: yes
-      register: fstab_change
-
-    - name: 9. Unmount vboxsf filesystems if fstab changed
-      ansible.builtin.shell:
-        cmd: "umount -a -t vboxsf || true"
-      when: fstab_change.changed
-
-    - name: 10. Install official ELevate repository for AlmaLinux 10
-      ansible.builtin.dnf:
-        name: "http://repo.almalinux.org/elevate/elevate-release-latest-el{{ ansible_distribution_major_version }}.noarch.rpm"
-        state: present
-        disable_gpg_check: true
-      when: ansible_distribution_major_version == '9'
-
-    - name: 11. Remove legacy EL8 ELevate packages and configurations
-      ansible.builtin.dnf:
-        name:
-          - leapp-upgrade-el8toel9
-          - python3-leapp
-          - leapp
-          - snactor
-        state: absent
-      when: ansible_distribution_major_version == '9'
-
-    - name: 12. Strip old excludes from yum/dnf configuration
-      ansible.builtin.lineinfile:
-        path: /etc/yum.conf
-        regexp: '^exclude=.*leapp.*'
-        state: absent
-      when: ansible_distribution_major_version == '9'
-
-    - name: 13. Clean DNF cache and purge cache directory
-      ansible.builtin.shell: |
-        dnf clean all
-        rm -rf /var/cache/dnf
-      when: ansible_distribution_major_version == '9'
-
-    - name: 14. Install Leapp framework and AlmaLinux 10 migration data
-      ansible.builtin.dnf:
-        name:
-          - leapp
-          - python3-leapp
-          - leapp-upgrade
-          - leapp-data-almalinux
-        state: latest
-        allowerasing: true
-        update_cache: true
-      when: ansible_distribution_major_version == '9'
-
-    - name: 15. Dynamically discover all non-active kernels
-      ansible.builtin.shell: |
-        rpm -q kernel kernel-core kernel-modules kernel-devel | grep -v "$(uname -r)" || true
-      register: old_kernels_detected
-      changed_when: false
-      when: ansible_distribution_major_version == '9'
-
-    - name: 16. Purge discovered kernel remnants dynamically
-      ansible.builtin.dnf:
-        name: "{{ old_kernels_detected.stdout_lines }}"
-        state: absent
-      when: 
-        - ansible_distribution_major_version == '9'
-        - old_kernels_detected.stdout | length > 0
-
-    - name: 17. Dynamically remove custom python and stale leapp modules
-      ansible.builtin.dnf:
-        name: 
-          - "custom-python*"
-          - "lua-posix"
-        state: absent
-      when: ansible_distribution_major_version == '9'
-
-    - name: 18. Purge any corrupted automated answerfile profiles
-      ansible.builtin.file:
-        path: /var/log/leapp/answerfile
-        state: absent
-      when: ansible_distribution_major_version == '9'
-
-    - name: 19. Initialize clean answerfile template with explicit section headers
-      ansible.builtin.copy:
-        content: |
-          [remove_pam_userdb]
-          confirm = true
-
-          [check_vdo]
-          confirm = true
-        dest: /var/log/leapp/answerfile
-        mode: '0600'
-      when: ansible_distribution_major_version == '9'
-
-    - name: 20. Ensure predictable interface naming is active for Leapp
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/udev/rules.d/80-net-setup-link.rules
-        - /etc/udev/rules.d/70-persistent-net.rules
-
-    - name: 21. Wipe all legacy ifcfg files to prevent network inhibitor failures
-      ansible.builtin.shell: |
-        rm -f /etc/sysconfig/network-scripts/ifcfg-*
-        nmcli connection reload
-      when: ansible_distribution_major_version == '9'
-
-    - name: 22. Force reboot to apply the new active kernel structures
-      ansible.builtin.reboot:
-        reboot_timeout: 300
-      when: ansible_distribution_major_version == '9'
-
-    - name: 23. Run Leapp pre-upgrade analysis
-      ansible.builtin.command: leapp preupgrade --no-rhsm
-      register: preupgrade_result
-      environment:
-        PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
-      failed_when: false
-      when: ansible_distribution_major_version == '9'
-
-    - name: 24. Check if pre-upgrade failed due to critical inhibitors
-      ansible.builtin.fail:
-        msg: >
-          Leapp pre-upgrade failed. 
-          Error Message: {{ preupgrade_result.msg | default('None') }}.
-          Review /var/log/leapp/leapp-report.txt on the remote host.
-      when: 
-        - ansible_distribution_major_version == '9'
-        - preupgrade_result.rc is defined
-        - preupgrade_result.rc != 0
-        - >
-          'inhibitor' in (preupgrade_result.stdout | default('')) or 
-          'inhibitor' in (preupgrade_result.stderr | default('')) or 
-          preupgrade_result.rc == 127
-
-    - name: 25. Execute the actual OS upgrade process (Silenced background job)
-      ansible.builtin.command: leapp upgrade
-      register: upgrade_result_async
-      async: 1800
-      poll: 0            # Setting this to 0 immediately silences the terminal spam
-      environment:
-        PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
-      when: ansible_distribution_major_version == '9'
-
-    - name: 25b. Wait for the upgrade to finish silently in the background
-      ansible.builtin.async_status:
-        jid: "{{ upgrade_result_async.ansible_job_id }}"
-      register: job_result
-      until: job_result.finished
-      retries: 180       # 180 retries * 10 seconds delay = 30 minutes total timeout
-      delay: 10          # Check status every 10 seconds silently
-      when: 
-        - ansible_distribution_major_version == '9'
-        - upgrade_result_async.ansible_job_id is defined
-
-    - name: 26. Trigger the ELevate migration reboot asynchronously
-      ansible.builtin.shell: sleep 5 && reboot
-      async: 1
-      poll: 0
-      when: ansible_distribution_major_version == '9'
-
-    - name: 27. Wait for the AlmaLinux 10 package upgrade to finish completely
-      ansible.builtin.wait_for_connection:
-        delay: 60
-        timeout: 2700
-      when: ansible_distribution_major_version == '9'
-
-    - name: 28. Post-Upgrade System Validation
       block:
-        - name: 28a. Force Ansible to refresh system information
+        - name: 2. Run a full system update to latest packages
+          ansible.builtin.shell: "yum update -y"
+          register: dnf_update
+          changed_when: "'Nothing to do' not in dnf_update.stdout"
+
+        # ---------------------------------------------------------------------
+        # CONDITIONAL NETWORK MIGRATION BLOCK (SPEED-OPTIMISED WITH IDEMPOTENCY)
+        # ---------------------------------------------------------------------
+        - name: 3a. Check if network interface migration has already been executed
+          ansible.builtin.stat:
+            path: /etc/systemd/network/10-enp0s0.link
+          register: network_migration_done
+
+        - name: 3b. Stage the network migration script
+          ansible.builtin.copy:
+            src: "network_name_migration.sh"
+            dest: /tmp/network_name_migration.sh
+            mode: "0755"
+          when: not network_migration_done.stat.exists
+
+        - name: 3c. Migrate legacy network interfaces to NetworkManager asynchronously
+          ansible.builtin.shell: /bin/bash /tmp/network_name_migration.sh
+          async: 120
+          poll: 0
+          register: network_migration_async
+          when: not network_migration_done.stat.exists
+
+        - name: 3d. Wait for the network connection to recover
+          ansible.builtin.wait_for_connection:
+            delay: 5
+            timeout: 90
+          when: not network_migration_done.stat.exists and network_migration_async.ansible_job_id is defined
+
+        - name: 3e. Remove the temporary migration script
+          ansible.builtin.file:
+            path: /tmp/network_name_migration.sh
+            state: absent
+          when: not network_migration_done.stat.exists
+
+        # ---------------------------------------------------------------------
+        # SYSTEM PREPARATION STEPS
+        # ---------------------------------------------------------------------
+        - name: 4. Reboot if updates were installed
+          ansible.builtin.reboot:
+            reboot_timeout: 300
+          when: dnf_update.changed
+
+        - name: 5. Comment synced vagrant local project directory out of fstab
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            regexp: '^#?(\s*vagrant\s+/vagrant\s+vboxsf.*)'
+            line: '#\1'
+            backrefs: yes
+          register: fstab_change
+
+        - name: 6. Unmount vboxsf filesystems if fstab changed
+          ansible.builtin.shell:
+            cmd: "umount -a -t vboxsf || true"
+          when: fstab_change.changed
+
+        - name: 7. Install official ELevate repository for AlmaLinux 10
+          ansible.builtin.dnf:
+            name: "http://repo.almalinux.org/elevate/elevate-release-latest-el{{ ansible_distribution_major_version }}.noarch.rpm"
+            state: present
+            disable_gpg_check: true
+
+        - name: 8. Remove legacy EL8 ELevate packages and configurations
+          ansible.builtin.dnf:
+            name:
+              - leapp-upgrade-el8toel9
+              - python3-leapp
+              - leapp
+              - snactor
+            state: absent
+
+        - name: 9. Strip old excludes from yum/dnf configuration
+          ansible.builtin.lineinfile:
+            path: /etc/yum.conf
+            regexp: '^exclude=.*leapp.*'
+            state: absent
+
+        - name: 10. Clean DNF cache and purge cache directory
+          ansible.builtin.shell: |
+            dnf clean all
+            rm -rf /var/cache/dnf
+
+        - name: 11. Install Leapp framework and AlmaLinux 10 migration data
+          ansible.builtin.dnf:
+            name:
+              - leapp
+              - python3-leapp
+              - leapp-upgrade
+              - leapp-data-almalinux
+            state: latest
+            allowerasing: true
+            update_cache: true
+
+        # FIX: Explicitly forces the system to bind the missing "upgrade" command
+        - name: 11b. Force install missing Leapp upgrade command plugins
+          ansible.builtin.dnf:
+            name: "leapp-command(upgrade)"
+            state: present
+
+        - name: 12. Dynamically discover all non-active kernels
+          ansible.builtin.shell: |
+            rpm -q kernel kernel-core kernel-modules kernel-devel | grep -v "$(uname -r)" || true
+          register: old_kernels_detected
+          changed_when: false
+
+        - name: 13. Dynamically remove custom python and stale development tools
+          ansible.builtin.dnf:
+            name: 
+              - "custom-python*"
+              - "lua-posix"
+              - "gcc"
+              - "make"
+              - "*-devel"
+            state: absent
+
+        - name: 14. Purge any corrupted automated answerfile profiles
+          ansible.builtin.file:
+            path: /var/log/leapp/answerfile
+            state: absent
+
+        - name: 15. Initialize clean answerfile template with explicit section headers
+          ansible.builtin.copy:
+            content: |
+              [remove_pam_userdb]
+              confirm = true
+
+              [check_vdo]
+              confirm = true
+
+              [unsupported_upgrade_unverified_packages]
+              confirm = true
+            dest: /var/log/leapp/answerfile
+            mode: '0600'
+
+        - name: 16a. Ensure predictable interface naming is active for Leapp
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/udev/rules.d/80-net-setup-link.rules
+            - /etc/udev/rules.d/70-persistent-net.rules
+
+        - name: 16b. Purge deprecated Xorg graphic packages to satisfy Alma10 baseline
+          ansible.builtin.dnf:
+            name:
+              - "xorg-x11-server*"
+              - "xorg-x11-drv*"
+            state: absent
+
+        - name: 17a. Wipe all legacy ifcfg files and global configs to prevent network inhibitor failures
+          ansible.builtin.shell: |
+            rm -f /etc/sysconfig/network-scripts/ifcfg-*
+            rm -f /etc/sysconfig/network
+            nmcli connection reload
+
+        - name: 17b. Purge auxiliary repo layouts to ensure a clean package list
+          ansible.builtin.file:
+            path: "/etc/yum.repos.d/{{ item }}"
+            state: absent
+          loop:
+            - almalinux-ha.repo
+            - almalinux-plus.repo
+
+        # ---------------------------------------------------------------------
+        # LEAPP MIGRATION WORKFLOW
+        # ---------------------------------------------------------------------
+        - name: 18. Run Leapp pre-upgrade analysis
+          ansible.builtin.command: leapp preupgrade --no-rhsm
+          register: preupgrade_result
+          environment:
+            PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
+          failed_when: false
+
+        - name: 19. Check if pre-upgrade failed due to critical inhibitors
+          ansible.builtin.fail:
+            msg: >
+              Leapp pre-upgrade failed due to a hard inhibitor blocker!
+              Review /var/log/leapp/leapp-report.txt on the remote host.
+          when: 
+            - preupgrade_result.stdout is defined
+            - "'inhibitor: yes' in (preupgrade_result.stdout | lower) or 'inhibitor: yes' in (preupgrade_result.stderr | lower)"
+
+        - name: 20a. Execute the actual OS upgrade process (Silenced background job)
+          ansible.builtin.command: leapp upgrade --no-rhsm
+          register: upgrade_result_async
+          async: 1800
+          poll: 0
+          environment:
+            PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
+
+        - name: 20b. Wait for the upgrade to finish silently in the background
+          ansible.builtin.async_status:
+            jid: "{{ upgrade_result_async.ansible_job_id }}"
+          register: job_result
+          until: job_result.finished
+          retries: 180       
+          delay: 10          
+          when: upgrade_result_async.ansible_job_id is defined
+          no_log: true
+
+        - name: 21a. Force reboot to apply the new active kernel structures safely
+          ansible.builtin.shell: "sleep 5 && shutdown -r now"
+          async: 1
+          poll: 0
+
+        - name: 21b. Wait for virtual machine to cleanly shut down and completely boot back up
+          ansible.builtin.wait_for_connection:
+            delay: 45           # FIX: Gives VirtualBox plenty of time to flush the local host port cache
+            connect_timeout: 30 # FIX: Prevents the socket from timing out early during banner exchange
+            timeout: 900        # 15 minutes max allocation for the full filesystem migration
+
+        - name: 22. Wait for the AlmaLinux 10 package upgrade to finish completely
+          ansible.builtin.wait_for_connection:
+            delay: 60
+            timeout: 2700
+
+    # =========================================================================
+    # POST-UPGRADE VALIDATION ENGINE
+    # =========================================================================
+    - name: 23. Post-Upgrade System Validation
+      block:
+        - name: 23a. Force Ansible to refresh system information
           ansible.builtin.setup:
 
-        - name: 28b. Validate that the system has successfully upgraded to major version 10
+        - name: 23b. Validate that the system has successfully upgraded to major version 10
           ansible.builtin.assert:
             that:
               - ansible_distribution_major_version == '10'
             fail_msg: "System upgrade verification failed! System is not running version 10."
-            success_msg: "Perfect! System has been verified running AlmaLinux 10."
+            success_msg: "Perfect! System successfully verified on AlmaLinux 10."
+
+        - name: 23c. Purge legacy EL9 kernels and obsolete ELevate artifacts
+          ansible.builtin.dnf:
+            name:
+              - kernel-core-5.14.0*
+              - kernel-modules-5.14.0*
+              - leapp-data-almalinux
+              - elevate-release
+              - leapp-deps-el9
+              - leapp-repository-deps-el9
+            state: absent
+
+        - name: 23d. Remove deprecated Berkeley DB runtime packages
+          ansible.builtin.dnf: 
+            name: 
+              - libdb- 
+              - libdb-utils
+            state: absent

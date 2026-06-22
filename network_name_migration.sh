@@ -4,55 +4,52 @@ NM_DIR="/etc/NetworkManager/system-connections"
 SYSTEMD_DIR="/etc/systemd/network"
 
 # =================================================================
-# IDEMPOTENCY CHECK: Skip if configuration has already been applied
+# IDEMPOTENCY CHECK: Skip if modern systemd link configurations exist
 # =================================================================
-if [ -f "${SYSTEMD_DIR}/10-enp0s0.link" ] || [ -f "${SYSTEMD_DIR}/10-enp0s1.link" ]; then
-    echo "* Network interface migration already completed. Skipping configuration."
+if compgen -G "${SYSTEMD_DIR}/10-enp0s*.link" > /dev/null; then
+    echo "* Network interface migration to enp* layout already completed. Skipping."
     exit 0
 fi
 
 mkdir -p "$NM_DIR" "$SYSTEMD_DIR"
-
-# Track interface sequence order safely using a Process Substitution 
-# This prevents the while loop from running in a subshell
 COUNTER=0
 
+# Safely loop through interfaces without running in a subshell
 while read -r name status mac _; do
     
-    # 1. Broad Idempotent Filter: Ignore loopback and empty mac rows
+    # Ignore loopback and empty/malformed lines
     if [ "$name" == "lo" ] || [ -z "$mac" ]; then
         continue
     fi
 
-    # 2. Assign indexes based on actual IP subnet presence to guarantee accuracy
-    # Check if the interface currently holds the 192.168.56.x network
-    if ip addr show dev "$name" | grep -q "192.168.56."; then
+    # Extract the current active IPv4 address to inspect the subnet
+    IP_ADDR=$(ip -4 addr show dev "$name" | awk '/inet / {print $2}')
+
+    # =================================================================
+    # DYNAMIC SUBNET DETECT & INDEX ASSIGNMENT
+    # =================================================================
+    # Catch any interface holding a 192.168.56.xx IP address
+    if [[ "$IP_ADDR" == *"192.168.56."* ]]; then
         INDEX=1
-    # Check if it holds the 10.0.2.x network
-    elif ip addr show dev "$name" | grep -q "10.0.2."; then
+        NEVER_DEFAULT="never-default=true"
+    # Catch your main NAT management network
+    elif [[ "$IP_ADDR" == *"10.0.2."* ]]; then
         INDEX=0
+        NEVER_DEFAULT="never-default=false"
     else
-        # Fallback to sequential index if IPs aren't active yet
+        # Fallback index tracking for extra interfaces
         INDEX=$COUNTER
+        NEVER_DEFAULT="never-default=false"
         COUNTER=$((COUNTER + 1))
     fi
 
-    # 3. Define the deterministic target interface identity
+    # Define the target predictable interface layout
     NEW_NAME="enp0s${INDEX}"
 
     # =================================================================
     # LAYER A: NETWORKMANAGER KEYFILE CONFIGURATION
     # =================================================================
     NM_FILE="${NM_DIR}/${NEW_NAME}.nmconnection"
-
-    # Force 192.168.56.x (INDEX 1) to never be the default internet gateway
-    if [ "$INDEX" -eq 1 ]; then
-        IPV4_METHOD="auto"
-        NEVER_DEFAULT="never-default=true"
-    else
-        IPV4_METHOD="auto"
-        NEVER_DEFAULT="never-default=false"
-    fi
 
     cat << EOF > "$NM_FILE"
 [connection]
@@ -64,14 +61,13 @@ interface-name=${NEW_NAME}
 mac-address=${mac}
 
 [ipv4]
-method=${IPV4_METHOD}
+method=auto
 ${NEVER_DEFAULT}
 
 [ipv6]
 method=auto
 EOF
 
-    # Fix secure file permissions required by NetworkManager
     chmod 600 "$NM_FILE"
 
     # =================================================================
@@ -87,24 +83,18 @@ MACAddress=${mac}
 Name=${NEW_NAME}
 EOF
 
-    echo "Mapped and generated: $name -> $NEW_NAME (MAC: $mac, Mode: Index ${INDEX})"
+    echo "Mapped and generated: $name -> $NEW_NAME (IP: ${IP_ADDR:-None}, MAC: $mac)"
 
-# The syntax below (< <(command)) keeps the loop in the main shell process
 done < <(ip -brief link show)
 
-# Reload the NetworkManager engine configuration tables
+# Reload the NetworkManager engine settings
 echo "Applying new connection profiles..."
 nmcli connection reload
 
-echo "Cleaning up legacy ifcfg files..."
-if [ -d "/etc/sysconfig/network-scripts" ]; then
-    # Delete or move the old ifcfg files so Leapp passes its verification check
-    rm -f /etc/sysconfig/network-scripts/ifcfg-*
-fi
-
-echo "Configuring python312 system mapping..."
-if [ -f "/usr/bin/python3.12" ]; then
-    ln -sf /usr/bin/python3.12 /usr/bin/python312
+# Clear out ALL legacy ifcfg scripts to bypass the Leapp upgrade block
+if compgen -G "/etc/sysconfig/network-scripts/ifcfg-*" > /dev/null; then
+    echo "Archiving old network scripts to /root/..."
+    mv /etc/sysconfig/network-scripts/ifcfg-* /root/
 else
-    echo "Warning: Native python3.12 binary not found at /usr/bin/python3.12"
+    echo "No old ifcfg-* files found to clear."
 fi

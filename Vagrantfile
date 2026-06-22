@@ -7,6 +7,8 @@ Vagrant.configure("2") do |config|
 
   # Global Provider Settings (applied to all machines regardless of box)
   config.vm.provider "virtualbox" do |vb|
+    vb.cpus = 2         # Bumping to 2 CPUs significantly speeds up compilation
+    vb.memory = 2048    # 2GB RAM prevents disk thrashing during DNF transactions
     vb.default_nic_type = "virtio"
     vb.customize ["modifyvm", :id, "--vram", "12"]
   end
@@ -49,14 +51,14 @@ Vagrant.configure("2") do |config|
   config.vm.define "vm1" do |vm1|
     vm1.vm.box = "almalinux/8"
     vm1.vm.hostname = "vm1.do1.lab"
-    vm1.vm.network "private_network", ip: "192.168.56.100"
+    vm1.vm.network "private_network", ip: "192.168.56.100", auto_config: false
     vm1.vm.network "forwarded_port", guest: 80, host: 8080, auto_correct: true
   end 
 
   config.vm.define "vm2" do |vm2|
     vm2.vm.box = "almalinux/8"
     vm2.vm.hostname = "vm2.do1.lab"
-    vm2.vm.network "private_network", ip: "192.168.56.101"
+    vm2.vm.network "private_network", ip: "192.168.56.101", auto_config: false
     vm2.vm.network "forwarded_port", guest: 80, host: 8081, auto_correct: true
   end
 
