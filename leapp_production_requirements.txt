@@ -1,0 +1,55 @@
+===============================================================================
+PRODUCTION LEVELmatrix: ALMALINUX 9 TO 10 LEAPP UPGRADE REQUIREMENTS
+===============================================================================
+Author: Ivo & Dobrin (Enterprise Systems Automation Group)
+
+1. DISK & PARTITION BOUNDARIES (90% of failures happen here)
+-------------------------------------------------------------------------------
+* Root Partition (/) Space: 
+  - Minimum: 5 GB free space.
+  - Recommended: 10 GB free space.
+  - Context: Must cache 1.1 GB+ of EL10 RPM assets inside /var/lib/leapp/ 
+    while keeping the running EL9 operational space completely intact.
+
+* Boot Partition (/boot) Space:
+  - Minimum: 250 MB free space.
+  - Recommended: 500 MB free space.
+  - Context: Dracut requires free sectors to pack down and compile the heavy, 
+    highly-compressed temporary upgrade initramfs image file.
+
+* Mount Restrictions (/etc/fstab):
+  - Rule: Network shares (NFS, CIFS/Samba, GlusterFS) and temporary provider 
+    shared directories (like Vagrant vboxsf blocks) MUST be commented out.
+  - Context: The isolated upgrade kernel cannot resolve network dependencies 
+    mid-pivot and will crash straight into a Dracut emergency shell.
+
+2. BARE-METAL SERVER REQUIREMENTS
+-------------------------------------------------------------------------------
+* CPU Compute: Minimum 2 physical cores. 4 cores highly recommended.
+* Memory (RAM): Minimum 4 GB of free, unallocated RAM space.
+  - Critical Note: High-utilization workloads (database pools like MySQL, 
+    PostgreSQL, or intensive application threads) must be stopped before 
+    execution to prevent triggering the Linux Out-Of-Memory (OOM) killer.
+* Hardware Support: Physical RAID arrays (HPE Smart Array, Broadcom/MegaRAID) 
+    and network interfaces must be explicitly cross-verified with upstream 
+    EL10 compatibility logs. EL10 removes legacy storage controller drivers.
+
+3. VIRTUAL MACHINE REQUIREMENTS (Cloud / Proxmox / ESXi / AWS)
+-------------------------------------------------------------------------------
+* CPU Compute: Minimum 2 vCPUs.
+* Memory (RAM): Minimum 4 GB production standard. (Absolute minimal template: 
+  2 GB of RAM paired with a dedicated 2 GB system swap partition initialized).
+* Storage Drivers: Virtual setups must leverage paravirtualized network and 
+  block devices (virtio for KVM/Proxmox, native VMware Tools templates).
+* Recovery Safety: A full hypervisor-level snapshot (VMware snapshot, Proxmox 
+  snapshot, AWS EBS snapshot) is a MANDATORY prerequisite before execution.
+
+4. THREE-SECOND PRODUCTION SANITY CHECK SCRIPT
+-------------------------------------------------------------------------------
+Run this script on a target server to quickly evaluate its upgrade readiness:
+
+  df -m / /boot                           # Evaluates disk capacity in MB
+  free -h                                 # Evaluates active RAM availability
+  grep -E "nfs|cifs|vboxsf" /etc/fstab    # Checks for dangerous mount loops
+
+===============================================================================
