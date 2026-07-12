@@ -14,63 +14,72 @@
         state: absent
       loop:
         - /etc/yum.repos.d/elevate.repo
+        - /etc/yum.repos.d/epel*.repo
         - /var/cache/dnf
         - /tmp/elevate-release.rpm
 
     # =========================================================================
-    # MAIN ALMALINUX 8 TO 9 MIGRATION ENGINE
+    # STEP 1: MAIN ALMALINUX 8 TO 9 MIGRATION ENGINE
     # =========================================================================
     - name: Execute AlmaLinux 8 to 9 Migration Pipeline
       when: ansible_distribution_major_version == upgrade_source_major
       block:
-        - name: 2. Run a full system update to latest packages
+        - name: 1. Run a full system update to latest packages
           ansible.builtin.shell: "yum update -y"
           register: dnf_update
           changed_when: "'Nothing to do' not in dnf_update.stdout"
 
+        - name: 2. Install official ELevate repository for AlmaLinux 9
+          ansible.builtin.shell: "yum install -y http://repo.almalinux.org/elevate/elevate-release-latest-el$(rpm --eval %rhel).noarch.rpm"
+          
+        - name: 3. Install Leapp upgrade packages and AlmaLinux data
+          ansible.builtin.shell: |
+            yum install -y leapp-upgrade
+            yum install -y leapp-data-almalinux
+
         # ---------------------------------------------------------------------
-        # CONDITIONAL NETWORK MIGRATION BLOCK (SPEED-OPTIMISED WITH IDEMPOTENCY)
+        # STEP 2: CONDITIONAL NETWORK MIGRATION BLOCK (SPEED-OPTIMISED WITH IDEMPOTENCY)
         # ---------------------------------------------------------------------
-        - name: 3a. Check if network interface migration has already been executed
+        - name: 4a. Check if network interface migration has already been executed
           ansible.builtin.stat:
             path: /etc/systemd/network/10-enp0s0.link
           register: network_migration_done
 
-        - name: 3b. Stage the network migration script
+        - name: 4b. Stage the network migration script
           ansible.builtin.copy:
             src: "scripts/network_name_migration.sh"
             dest: /tmp/network_name_migration.sh
             mode: "0755"
           when: not network_migration_done.stat.exists
 
-        - name: 3c. Migrate legacy network interfaces to NetworkManager asynchronously
+        - name: 4c. Migrate legacy network interfaces to NetworkManager asynchronously
           ansible.builtin.shell: /bin/bash /tmp/network_name_migration.sh
           async: 120
           poll: 0
           register: network_migration_async
           when: not network_migration_done.stat.exists
 
-        - name: 3d. Wait for the network connection to recover
+        - name: 4d. Wait for the network connection to recover
           ansible.builtin.wait_for_connection:
             delay: 5
             timeout: 90
           when: not network_migration_done.stat.exists and network_migration_async.ansible_job_id is defined
 
-        - name: 3e. Remove the temporary migration script
+        - name: 4e. Remove the temporary migration script
           ansible.builtin.file:
             path: /tmp/network_name_migration.sh
             state: absent
           when: not network_migration_done.stat.exists
 
         # ---------------------------------------------------------------------
-        # SYSTEM PREPARATION STEPS
+        # STEP 3: SYSTEM PREPARATION STEPS
         # ---------------------------------------------------------------------
-        - name: 4. Reboot if updates were installed
+        - name: 5. Reboot if updates were installed
           ansible.builtin.reboot:
             reboot_timeout: 300
           when: dnf_update.changed
 
-        - name: 5. Comment synced vagrant local project directory
+        - name: 6. Comment synced vagrant local project directory
           ansible.builtin.lineinfile:
             path: /etc/fstab
             regexp: '^#?(\s*vagrant\s+/vagrant\s+vboxsf.*)'
@@ -79,7 +88,7 @@
           register: fstab_change
           when: ansible_distribution_major_version == upgrade_source_major
 
-        - name: 6. Unmount vboxsf filesystems if fstab changed
+        - name: 7. Unmount vboxsf filesystems if fstab changed
           ansible.posix.mount:
             path: /vagrant
             state: unmounted
@@ -88,49 +97,61 @@
             - fstab_change.changed
           failed_when: false
 
-        - name: 7. Install official ELevate repository for AlmaLinux 9
-          ansible.builtin.shell: "dnf install -y http://repo.almalinux.org/elevate/elevate-release-latest-el$(rpm --eval %rhel).noarch.rpm"
-          
-        - name: 8. Install Leapp framework and AlmaLinux migration data
-          ansible.builtin.shell: |
-            dnf clean all
-            rm -rf /var/cache/dnf
-            yum install -y --allowerasing leapp-upgrade leapp-data-almalinux
-
-        - name: 10. Disable setup link rules
+        - name: 8. Disable setup link rules
           ansible.builtin.file:
             src: /dev/null
             dest: /etc/udev/rules.d/80-net-setup-link.rules
             state: link
             force: true
 
-        - name: 11. Force reboot to apply the new kernel
+        - name: 9. Force reboot to apply the new kernel
           ansible.builtin.reboot:
-            reboot_timeout: 300
+            reboot_timeout: 900
+            connect_timeout: 30
+            pre_reboot_delay: 2
+            post_reboot_delay: 30
 
-        - name: 12a. Pre-confirm the VDO and PAM checks required by Leapp
+        - name: 10 Pre-confirm the VDO and PAM checks required by Leapp
           ansible.builtin.shell: |
             leapp answer --section check_vdo.confirm=True
             leapp answer --section remove_pam_pkcs11_module_check.confirm=True
           failed_when: false
 
-        - name: 12b. Set environment variables to bypass common SSH/Driver inhibitors
+        - name: 11. Set environment variables to bypass common SSH/Driver inhibitors
           ansible.builtin.lineinfile:
             path: /etc/environment
             line: "LEAPP_UNSUPPORTED=1 LEAPP_DEVEL_SKIP_CHECK_VDO=1"
             state: present
 
         # ---------------------------------------------------------------------
-        # LEAPP MIGRATION WORKFLOW
+        # STEP 4: LEAPP MIGRATION WORKFLOW
         # ---------------------------------------------------------------------
-        - name: 13. Run Leapp pre-upgrade analysis
-          ansible.builtin.command: leapp preupgrade --no-rhsm
+        - name: 13a. Copy the remediation engine script onto the guest filesystem
+          ansible.builtin.copy:
+            src: scripts/leapp_auto_remediate.sh
+            dest: /tmp/leapp_auto_remediate.sh
+            mode: "0755"
+
+        - name: 13b. Force run the remediation script natively via raw system shell
+          ansible.builtin.shell: "/tmp/leapp_auto_remediate.sh"
+          args:
+            executable: /bin/bash
+            
+        - name: 12. Run Leapp pre-upgrade analysis
+          ansible.builtin.command: leapp preupgrade
           register: preupgrade_result
           # FIX: Prevent the "UNSUPPORTED UPGRADE" banner text from flagging a false failure
           failed_when: false 
           changed_when: false
+          environment:
+            LEAPP_UNSUPPORTED: "1"
+            LEAPP_NO_DEPRECATION_CHECK: "1"
 
-        - name: 14. Check if pre-upgrade failed due to critical inhibitors
+        - name: 13c.Display pre-upgrade scan console output metrics
+          ansible.builtin.debug:
+            msg: "{{ preupgrade_result.stdout | regex_search('(?s)Debug output written to.*Answerfile has been generated.*') | default('Summary block not found.') }}"
+
+        - name: 13d. Check if pre-upgrade failed due to critical inhibitors
           ansible.builtin.fail:
             msg: >
               Leapp pre-upgrade failed due to a hard inhibitor blocker!
@@ -145,15 +166,15 @@
             (preupgrade_result.stdout is search('inhibitor: yes')) or
             (preupgrade_result.stderr is search('inhibitor: yes'))
 
-        - name: 15. Execute the actual OS upgrade process (Trigger background process)
-          ansible.builtin.command: leapp upgrade --no-rhsm
+        - name: 14a. Execute the actual OS upgrade process (Trigger background process)
+          ansible.builtin.command: leapp upgrade
           async: 7200
           poll: 0 # FIX: Must be 0 to instantly spawn a background job and register an ID
           register: upgrade_result_async
           environment:
             PATH: "/usr/sbin:/sbin:{{ ansible_env.PATH | default('/usr/bin:/bin') }}"
       
-        - name: 16. Wait for Leapp upgrade process to finish package transactions
+        - name: 14b. Wait for Leapp upgrade process to finish package transactions
           ansible.builtin.async_status:
             jid: "{{ upgrade_result_async.ansible_job_id }}"
           register: job_result
@@ -163,28 +184,25 @@
           # FIX: Prevents the task from blowing up if Task 15 ever skips
           when: upgrade_result_async.ansible_job_id is defined 
 
-        - name: 17. Trigger the ELevate migration reboot
+        - name: 14c. Trigger the ELevate migration reboot
           ansible.builtin.reboot:
             reboot_timeout: 2700  # Give it plenty of time to process files
 
-        - name: 17b. Block playbook execution until SSH banner exchange settles cleanly
+        - name: 14d. Block playbook execution until SSH banner exchange settles cleanly
           ansible.builtin.wait_for_connection:
             delay: 15             # Wait 15 seconds before trying to probe the network socket
             timeout: 600          # Allow up to 10 minutes for full disk conversions
 
-
     # =========================================================================
-    # POST-UPGRADE VALIDATION ENGINE
+    # STEP 5: POST-UPGRADE VALIDATION ENGINE
     # =========================================================================
-    - name: 18. Post-Upgrade System Validation
-      block:
-        - name: 18a Force Ansible to refresh system information
-          ansible.builtin.setup:
+    - name: 15a Force Ansible to refresh system information
+      ansible.builtin.setup:
 
-        - name: 18b Validate that the system has successfully upgraded to major version 9
-          ansible.builtin.assert:
-            that:
-              - ansible_distribution == "AlmaLinux"
-              - ansible_distribution_major_version == upgrade_target_major
-            fail_msg: "Upgrade validation failed! System is reporting version {{ ansible_distribution_version }} instead of AlmaLinux 9."
-            success_msg: "Success! Verified target machine is now actively running {{ ansible_distribution_version }}."
+    - name: 15b Validate that the system has successfully upgraded to major version 9
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "AlmaLinux"
+          - ansible_distribution_major_version == upgrade_target_major
+        fail_msg: "Upgrade validation failed! System is reporting version {{ ansible_distribution_version }} instead of AlmaLinux 9."
+        success_msg: "Success! Verified target machine is now actively running {{ ansible_distribution_version }}."
