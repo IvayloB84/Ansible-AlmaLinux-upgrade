@@ -5,12 +5,18 @@ on: [push, pull_request]
 jobs:
   validate-playbook:
     runs-on: ubuntu-latest
+    strategy:
+      # Tests both playbooks simultaneously in separate parallel environments
+      matrix:
+        playbook: 
+          - playbook_RH_migration_8_9.yml
+          - playbook_RH_migration_9_10.yml
     steps:
       - name: 1. Pull down the updated code from the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 2. Set up the Python background ecosystem
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -21,4 +27,5 @@ jobs:
 
       - name: 4. Perform a dry-run syntax verification check
         run: |
-          ansible-playbook playbook_RH_migration_9_10.yml --syntax-check
+          # The matrix variable inserts the current playbook name dynamically
+          ansible-playbook ${{ matrix.playbook }} --syntax-check

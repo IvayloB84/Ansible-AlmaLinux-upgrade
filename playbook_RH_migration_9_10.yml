@@ -1,259 +1,269 @@
 ---
+# =========================================================================
+# STEP 1: Import and run the second playbook first
+# =========================================================================
+- import_playbook: 4067471_predictable-nics_3.yml
+
 - name: ELevate AlmaLinux 9 to 10 on Cloud VMs
   hosts: all
   become: true
-  
+
   vars:
+    ansible_python_interpreter: /usr/bin/python3.12
     upgrade_source_major: "9"
     upgrade_target_major: "10"
-    ansible_python_interpreter: /usr/bin/python3.12
 
-  # 1. Disable early fact gathering so it doesn't crash on the initial handshake!
-  gather_facts: false
+  tasks:
+    - name: Force remove old corrupted repository files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/yum.repos.d/elevate.repo
+        - /etc/yum.repos.d/epel.repo
+        - /etc/yum.repos.d/epel-modular.repo
+        - /etc/yum.repos.d/epel-testing.repo
+        - /etc/yum.repos.d/epel-testing-modular.repo
+        - /var/cache/dnf
+        - /tmp/elevate-release.rpm
 
-  environment:
-    PATH: "/usr/bin:/usr/sbin:/bin:/sbin:{{ ansible_env.PATH | default('') }}"
-
-  tasks: 
     # =========================================================================
-    # STEP 1: INITIAL CLEANUP & PREPARATION
+    # MAIN ALMALINUX 9 TO 10 MIGRATION ENGINE
     # =========================================================================
-    - name: 1. Clean old repository metadata and lift exclude locks
+    - name: 1. Flush stale repository files, metadata structures, and lift locks
       ansible.builtin.shell: |
-        sed -i '/^exclude=.*/d' /etc/yum.conf 2>/dev/null || true
-        sed -i '/^exclude=.*/d' /etc/dnf/dnf.conf 2>/dev/null || true
-        rm -f /etc/yum.repos.d/elevate.repo
-        rm -f /etc/yum.repos.d/epel*.repo
-        rm -f /tmp/elevate-release.rpm
+        dnf remove -y leapp leapp-upgrade leapp-data-almalinux elevate-release 2>/dev/null || true     
+        sed -i '/^exclude=.*/d' /etc/yum.conf /etc/dnf/dnf.conf 2>/dev/null || true
+        rm -f /etc/yum.repos.d/epel*.repo /etc/yum.repos.d/almalinux-devel.repo /etc/yum.repos.d/almalinux.repo 2>/dev/null || true
+        # Force cache synchronization reset
         dnf clean all
-        rm -rf /var/cache/dnf
+      changed_when: true
 
-    - name: 2. Synchronize system packages to latest AlmaLinux 9 baseline
-      ansible.builtin.shell: "yum update -y"
-      register: dnf_update
+    - name: Execute AlmaLinux 9 to 10 Migration Pipeline
+      when: ansible_distribution_major_version == upgrade_source_major
+      block:
+        - name: 2. Run a full system update to latest packages
+          ansible.builtin.shell: "yum update -y"
+          register: dnf_update
+          changed_when: "'Nothing to do' not in dnf_update.stdout"
 
-    # ---------------------------------------------------------------------
-    # CONDITIONAL NETWORK MIGRATION BLOCK (IVO'S PRODUCTION ENGINE)
-    # ---------------------------------------------------------------------
-    - name: 3a. Check if network interface migration has already been executed
-      ansible.builtin.stat:
-        path: /etc/systemd/network/10-enp0s0.link
-      register: network_migration_done
+        # =========================================================================
+        # REPOSITORY CONFIGURATION & PLATFORM STAGING
+        # =========================================================================
+        - name: 3a. Telemetry Check Profile disk space usage BEFORE cleanup
+          ansible.builtin.shell: "df -h / /boot /var"
+          register: space_before
 
-    - name: 3b. Stage the network migration script
-      ansible.builtin.copy:
-        src: "scripts/network_name_migration.sh"
-        dest: /tmp/network_name_migration.sh
-        mode: "0755"
-      when: not network_migration_done.stat.exists
+        - name: 3b. Display baseline storage allocation matrix
+          ansible.builtin.debug:
+            msg: "{{ space_before.stdout_lines }}"
 
-    - name: 3c. Migrate legacy network interfaces to NetworkManager synchronously
-      ansible.builtin.command: /bin/bash /tmp/network_name_migration.sh
-      when: not network_migration_done.stat.exists
+        - name: 3c. Force purge custom python312 package via direct system shell
+          ansible.builtin.shell: "dnf remove -y custom-python312 python312 || true"
+          changed_when: true
 
-    - name: 3d. Clear and verify connection status to host
-      ansible.builtin.wait_for_connection:
-        delay: 5
-        timeout: 90
-      when: not network_migration_done.stat.exists
+        - name: 3d. Hard wipe residual unmanaged site-package filesystem directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /usr/lib64/python3.12
+            - /usr/lib/python3.12
 
-    # =========================================================================
-    # STEP 3: CORE DRIVER & STORAGE DEFENCE CONFIGURATION
-    # =========================================================================
-    - name: 4. Force comment out vagrant vboxsf mount points to prevent boot crash
-      ansible.builtin.replace:
-        path: /etc/fstab
-        regexp: '^([^#]*vagrant.*vboxsf.*)$'
-        replace: '# \1'
-      register: fstab_change
+        - name: 3e. Telemetry Check Profile disk space usage AFTER cleanup
+          ansible.builtin.shell: "df -h / /boot /var"
+          register: space_after
 
-    - name: 5. Unmount vboxsf filesystem right before leapp initialization
-      ansible.builtin.shell: "umount -a -t vboxsf || true && systemctl daemon-reload"
-      when: fstab_change.changed
+        - name: 3f. Display reclaimed storage allocation matrix
+          ansible.builtin.debug:
+            msg: "{{ space_after.stdout_lines }}"
 
-    - name: 6. Optimize dracut parameters to force an ultra-lean and block-aware initramfs
-      ansible.builtin.copy:
-        content: |
-          hostonly="yes"
-          do_strip="yes"
-          aggressive_strip="yes"
-          compress="xz"
-          
-          # DRIVER INJECTION: Force include core storage and block layout kernel modules
-          add_dracutmodules+=" multipath dm crypt lvm rootfs-block qemu-net "
-          drivers+=" mptbase mptscsih mptspi mpt2sas mpt3sas virtio virtio_blk virtio_pci virtio_scsi ata_piix ahci "
-        dest: /etc/dracut.conf.d/99-lean-upgrade-size.conf
-        mode: '0644'
+        # ---------------------------------------------------------------------
+        # CONDITIONAL NETWORK MIGRATION BLOCK (SPEED-OPTIMISED WITH IDEMPOTENCY)
+        # ---------------------------------------------------------------------
+        # - name: 11a. Check if network interface migration has already been executed
+        #   ansible.builtin.stat:
+        #     path: /etc/systemd/network/10-enp0s0.link
+        #   register: network_migration_done
 
-    # =========================================================================
-    # REPOSITORY CONFIGURATION & PLATFORM STAGING
-    # =========================================================================
-    - name: Telemetry Check Profile disk space usage BEFORE cleanup
-      ansible.builtin.shell: "df -h / /boot /var"
-      register: space_before
+        # - name: 11b. Stage the network migration script
+        #   ansible.builtin.copy:
+        #     src: "scripts/network_name_migration.sh"
+        #     dest: /tmp/network_name_migration.sh
+        #     mode: "0755"
+        #   when: not network_migration_done.stat.exists
 
-    - name: Display baseline storage allocation matrix
-      ansible.builtin.debug:
-        msg: "{{ space_before.stdout_lines }}"
+        # - name: 11c. Migrate legacy network interfaces to NetworkManager asynchronously
+        #   ansible.builtin.shell: /bin/bash /tmp/network_name_migration.sh
+        #   async: 120
+        #   poll: 0
+        #   register: network_migration_async
+        #   when: not network_migration_done.stat.exists
 
-    - name: 7. Purge obsolete or residual stale Leapp caches and old packages
-      ansible.builtin.shell: |
-        # 1. Forcefully uninstall the blocking unsigned software layers
-        yum remove -y custom-python312 dkms epel-release || true
-        
-        # 2. Complete a hard purge of the old dirty Python 3.12 site-packages links
-        rm -rf /usr/lib64/python3.12/site-packages/six* 2>/dev/null || true
-        rm -rf /usr/lib/python3.12/site-packages/six* 2>/dev/null || true
-        
-        # 3. AGGRESSIVE DISK RECLAMATION SHIELD: Reclaim storage space
-        dnf clean all
-        rm -rf /var/cache/dnf/*
-        rm -rf /var/lib/leapp/*
-        rm -rf /var/log/leapp/*
-        rm -f /etc/yum.repos.d/elevate.repo
-        rm -f /etc/yum.repos.d/epel*.repo
-        rm -f /tmp/elevate-release.rpm
-        sed -i '/^exclude=.*leapp.*/d' /etc/yum.conf 2>/dev/null || true
+        # - name: 11d. Wait for the network connection to recover
+        #   ansible.builtin.wait_for_connection:
+        #     delay: 5
+        #     timeout: 90
+        #   when: not network_migration_done.stat.exists and network_migration_async.ansible_job_id is defined
 
-    - name: Telemetry Check Profile disk space usage AFTER cleanup
-      ansible.builtin.shell: "df -h / /boot /var"
-      register: space_after
+        # - name: 11e. Remove the temporary migration script
+        #   ansible.builtin.file:
+        #     path: /tmp/network_name_migration.sh
+        #     state: absent
+        #   when: not network_migration_done.stat.exists
 
-    - name: Display reclaimed storage allocation matrix
-      ansible.builtin.debug:
-        msg: "{{ space_after.stdout_lines }}"
+        # ---------------------------------------------------------------------
+        # SYSTEM PREPARATION STEPS
+        # ---------------------------------------------------------------------
+        - name: 4. Reboot if updates were installed
+          ansible.builtin.reboot:
+            reboot_timeout: 300
+          when: dnf_update.changed
 
+        - name: 5a. Force comment out vagrant vboxsf mount points to prevent boot crash
+          ansible.builtin.replace:
+            path: /etc/fstab
+            regexp: '^([^#]*vagrant.*vboxsf.*)$'
+            replace: '# \1'
+          register: fstab_change
 
-    - name: 8. Clean up conflicting repositories and install official master ELevate tracking data
-      ansible.builtin.shell: |
-        rm -f /etc/yum.repos.d/almalinux*.repo
-        rm -f /etc/yum.repos.d/repo.almalinux.org*
-        dnf install -y http://repo.almalinux.org/elevate/elevate-release-latest-el$(rpm --eval %rhel).noarch.rpm
+        - name: 5b. Unmount vboxsf filesystem right before leapp initialization
+          ansible.builtin.shell: "umount -a -t vboxsf || true && systemctl daemon-reload"
+          when: fstab_change.changed
 
-        dnf reinstall -y almalinux-release || true        
+        - name: 6a. Install native ELevate repository
+          ansible.builtin.shell: "dnf install -y http://repo.almalinux.org/elevate/elevate-release-latest-el$(rpm --eval %rhel).noarch.rpm"
 
-    - name: 9. Install native Leapp framework core and AlmaLinux 10 migration modules
-      ansible.builtin.shell: |
-        dnf clean all
-        rm -rf /var/cache/dnf
-        
-        # THE METADATA ANCHOR: Forcefully pull the framework AND the version 10 data layout grids together
-        yum install -y --allowerasing leapp-upgrade leapp-data-almalinux
+        - name: 6b. Install Leapp upgrade packages and AlmaLinux data
+          ansible.builtin.shell: "dnf install -y leapp-upgrade leapp-data-almalinux"
+          register: leapp_install
+          changed_when: "'Nothing to do' not in leapp_install.stdout"
 
-    - name: 11. Initialize clean answerfile template with explicit confirmation headers
-      ansible.builtin.copy:
-        content: |
-          [remove_pam_userdb]
-          confirm = true
-          [check_vdo]
-          confirm = true
-          [unsupported_upgrade_unverified_packages]
-          confirm = true
-        dest: /var/log/leapp/answerfile
-        mode: '0600'
+        - name: 7. Inject standard automated upgrade verification answerfile
+          ansible.builtin.copy:
+            content: |
+              [remove_pam_userdb]
+              confirm = true
+              [check_vdo]
+              confirm = true
+              [unsupported_upgrade_unverified_packages]
+              confirm = true
+            dest: /var/log/leapp/answerfile
+            mode: '0600'
 
-    # =========================================================================
-    # STEP 4: CLEANUP & BOOT TARGET ALIGNMENT
-    # =========================================================================
-    - name: 11. Purge deprecated Xorg graphic packages to satisfy Alma10 baseline
-      ansible.builtin.shell: |
-        yum remove -y "xorg-x11-server*" "xorg-x11-drv*" || true
+        # =========================================================================
+        # PLATFORM STAGING: CLEANUP & BOOT TARGET ALIGNMENT
+        # =========================================================================
+        - name: 8. Purge deprecated Xorg graphic packages to satisfy Alma10 baseline
+          ansible.builtin.shell: |
+            yum remove -y "xorg-x11-server*" "xorg-x11-drv*" || true
+          changed_when: true
 
-    - name: 12. Intercept and align GRUB boot parameters to map the sda4 root target
-      ansible.builtin.shell: |
-        # 1. Update the default GRUB configuration templates
-        sed -i 's/root=\/dev\/sda3/root=\/dev\/sda4/g' /etc/default/grub 2>/dev/null || true
-        
-        # 2. Force rewrite active GRUB boot entries to map the correct hardware sector
-        if [ -f /boot/grub2/grub.cfg ]; then
-          sed -i 's/root=\/dev\/sda3/root=\/dev\/sda4/g' /boot/grub2/grub.cfg
-          sed -i 's/root=UUID=[^ ]*/root=\/dev\/sda4/g' /boot/grub2/grub.cfg
-        fi
-        
-        # 3. Ensure the active system fstab points its primary root mount to sda4 cleanly
-        sed -i 's/^.*\/ *xfs.*$/\/dev\/sda4 \/ xfs defaults 1 1/g' /etc/fstab
-      failed_when: false
+        - name: 9a-FollowUp-A. Protect core system packages from accidental dependency removal
+          ansible.builtin.package:
+            name:
+              - NetworkManager
+              - openssh-server
+              - openssh-clients
+              - curl
+              - tar
+            state: present
 
-    # =========================================================================
-    # STEP 5: RUN ANALYSIS, AUTO-HEAL, & UPGRADE WATCHDOG
-    # =========================================================================
-    - name: 13. Run Leapp pre-upgrade analysis (Forced System Python 3.9 Context)
-      ansible.builtin.command: /usr/bin/python3.9 /usr/bin/leapp preupgrade --no-rhsm
-      register: preupgrade_result
-      failed_when: false
+        - name: 9b-FollowUp-B. Sweep away orphaned legacy graphic dependencies
+          ansible.builtin.shell: dnf autoremove -y
+          changed_when: true
 
-    - name: 13a. Extract and print Leapp Report Summary Metrics Box
-      ansible.builtin.shell: |
-        /usr/bin/python3.9 -c '
-        import json, os
-        path = "/var/log/leapp/leapp-report.json"
-        if not os.path.exists(path):
-            print("ERROR: Leapp JSON report file missing.")
-            exit(0)
-        with open(path) as f:
-            data = json.load(f)
-        entries = data.get("entries", [])
-        inhibitors = sum(1 for e in entries if "inhibitor" in e.get("groups", []))
-        high = sum(1 for e in entries if e.get("severity") == "high" and "inhibitor" not in e.get("groups", []))
-        medium = sum(1 for e in entries if e.get("severity") == "medium")
-        low = sum(1 for e in entries if e.get("severity") == "low")
-        print("\n" + "="*60)
-        print("          LEAPP PRE-UPGRADE ANALYSIS AUDIT MATRIX")
-        print("="*60)
-        print(f"  CRITICAL INHIBITORS (HARD BLOCKERS) : {inhibitors}")
-        print(f"  HIGH RISK FACTORS (WARNINGS)       : {high}")
-        print(f"  MEDIUM RISK FACTORS                : {medium}")
-        print(f"  LOW/INFO RISK FACTORS              : {low}")
-        print("="*60 + "\n")
-        '
-      register: report_box
+        # =========================================================================
+        # PRE-UPGRADE ANALYSIS & TARGETED SECTOR PURGES
+        # =========================================================================
+        - name: 10. Remove custom overridden data files
+          ansible.builtin.file:
+            path: /etc/leapp/files/device_driver_deprecation_data.json
+            state: absent
 
-    - name: 13a_print. Display Leapp Audit Metrics Box directly on terminal
-      ansible.builtin.debug:
-        msg: "{{ report_box.stdout_lines }}"
+        - name: 11. Force reinstall official leapp data packages to restore original streams
+          ansible.builtin.shell: "dnf reinstall -y leapp-upgrade leapp-data-almalinux"
+          become: true
 
-    - name: 13b. Copy the remediation engine script onto the guest filesystem
-      ansible.builtin.copy:
-        src: scripts/leapp_auto_remediate.sh
-        dest: /tmp/leapp_auto_remediate.sh
-        mode: "0755"
+        # =========================================================================
+        # REMEDIATION & PRE-UPGRADE ANALYSIS
+        # =========================================================================
+        - name: 12a. Copy remediation engine script onto guest filesystem
+          ansible.builtin.copy:
+            src: scripts/leapp_auto_remediate.sh
+            dest: /tmp/leapp_auto_remediate.sh
+            mode: "0755"
 
-    - name: 13c. Force run the remediation script natively via raw system shell
-      ansible.builtin.shell: "/tmp/leapp_auto_remediate.sh"
-      args:
-        executable: /bin/bash
+        - name: 12b. Force run remediation script natively to fix environment configurations
+          ansible.builtin.shell: "/tmp/leapp_auto_remediate.sh"
+          become: true
+          ignore_errors: true
 
-    - name: 13c_shield. Inject permanent target configuration variables into Leapp system profile
-      ansible.builtin.shell: |
-        mkdir -p /etc/leapp
-        echo "LEAPP_TARGET_OS=almalinux" >> /etc/leapp/vars.all
-        echo "LEAPP_UPGRADE_PATH_TARGET_RELEASE=10.0" >> /etc/leapp/vars.all
-        echo "LEAPP_TARGET_PRODUCT_CHANNEL=ga" >> /etc/leapp/vars.all
+        - name: 12c. Clean up the script file from guest
+          ansible.builtin.file:
+            path: /tmp/leapp_auto_remediate.sh
+            state: absent
 
-    - name: 13d. Re-run pre-upgrade scan with explicit release channel target parameters
-      ansible.builtin.command: /usr/bin/python3.9 /usr/bin/leapp preupgrade --no-rhsm
-      # THE REPO ANCHOR: Force parameters ensuring DNF can resolve target streams cleanly
-      environment:
-        LEAPP_TARGET_OS: "almalinux"
-        LEAPP_UPGRADE_PATH_TARGET_RELEASE: "10.0"
-        LEAPP_TARGET_PRODUCT_CHANNEL: "ga"
+        - name: 13a. Run Leapp pre-upgrade analysis
+          ansible.builtin.command: /bin/leapp preupgrade
+          environment:
+            LEAPP_UNSUPPORTED: "1"
+            LEAPP_DEVEL_TARGET_PRODUCT: "AlmaLinux"
+            LEAPP_TARGET_PRODUCT_VERSION: "10"
+          register: preupgrade_result
+          ignore_errors: true
+          changed_when: false
 
-    - name: 14a. Execute the actual OS upgrade process with target parameters
-      ansible.builtin.command: /usr/bin/python3.9 /usr/bin/leapp upgrade --no-rhsm
-      environment:
-        LEAPP_TARGET_OS: "almalinux"
-        LEAPP_UPGRADE_PATH_TARGET_RELEASE: "10.0"
-        LEAPP_TARGET_PRODUCT_CHANNEL: "ga"
-      async: 7200
-      poll: 0
-      register: upgrade_result_async
+        - name: 13b. Display pre-upgrade scan console output metrics
+          ansible.builtin.debug:
+            msg: "{{ (preupgrade_result.stdout | regex_search('(?s)(Debug output written to.*|UPGRADE INHIBITORS.*)') | default('Summary block not found.', true)).split('\n') }}"
 
-    - name: 14b. Wait for Leapp upgrade process to finish package transactions
-      ansible.builtin.async_status:
-        jid: "{{ upgrade_result_async.ansible_job_id }}"
-      register: job_result
-      until: job_result.finished
-      retries: 360
-      delay: 10
-      when: upgrade_result_async.ansible_job_id is defined
+        - name: 13c. Check if pre-upgrade failed due to critical inhibitors
+          ansible.builtin.fail:
+            msg: >
+              Leapp pre-upgrade failed due to a hard inhibitor blocker!
+              Review /var/log/leapp/leapp-report.txt on the remote host.
+              ---------------------------------------------------------
+              STDOUT PAYLOAD: {{ preupgrade_result.stdout }}
+              STDERR PAYLOAD: {{ preupgrade_result.stderr }}
+          when: >
+            (preupgrade_result.stdout is search('UPGRADE INHIBITED')) or
+            (preupgrade_result.stderr is search('UPGRADE INHIBITED')) or
+            (preupgrade_result.stdout is search('inhibitor: yes')) or
+            (preupgrade_result.stderr is search('inhibitor: yes'))
 
+        # =========================================================================
+        # TRANSACTION EXECUTION ENGINE
+        # =========================================================================
+        - name: 14a. Trigger the ELevate upgrade synchronously
+          ansible.builtin.command: /bin/leapp upgrade
+          environment:
+            LEAPP_UNSUPPORTED: "1"
+            LEAPP_DEVEL_TARGET_PRODUCT: "AlmaLinux"
+            LEAPP_TARGET_PRODUCT_VERSION: "{{ upgrade_target_major }}" 
+          register: leapp_upgrade_result
+          changed_when: true
+
+        - name: 14b. Initiate migration reboot and wait for AlmaLinux 10 conversion
+          ansible.builtin.reboot:
+            reboot_timeout: 2700  
+            connect_timeout: 30
+            msg: "Ansible initiating controlled ELevate transaction upgrade reboot."
+
+        # =========================================================================
+        #  POST-UPGRADE VALIDATION ENGINE
+        # =========================================================================
+        - name: 15a. Force Ansible to refresh system information
+          ansible.builtin.setup:
+          vars:
+            ansible_python_interpreter: /usr/bin/python3
+          tags: validate
+
+        - name: 15b Validate that the system has successfully upgraded to major version 10
+          ansible.builtin.assert:
+            that:
+              - ansible_distribution == "AlmaLinux"
+              - ansible_distribution_major_version == upgrade_target_major
+            fail_msg: "Upgrade validation failed! System is reporting version {{ ansible_distribution_version }} instead of AlmaLinux 10."
+            success_msg: "Success! Verified target machine is now actively running {{ ansible_distribution_version }}."
+          tags: validate

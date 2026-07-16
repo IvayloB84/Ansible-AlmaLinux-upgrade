@@ -1,7 +1,7 @@
 ===============================================================================
 PRODUCTION LEVELmatrix: ALMALINUX 9 TO 10 LEAPP UPGRADE REQUIREMENTS
 ===============================================================================
-Author: Ivo & Dobrin (Enterprise Systems Automation Group)
+(Enterprise Systems Automation Group)
 
 1. DISK & PARTITION BOUNDARIES (90% of failures happen here)
 -------------------------------------------------------------------------------

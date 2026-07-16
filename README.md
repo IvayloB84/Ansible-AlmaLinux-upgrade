@@ -48,17 +48,7 @@ To keep the codebase streamlined and clean for GitHub, the playbooks incorporate
 
 ## 🔬 Architectural Breakthroughs & Forensic Discoveries (AlmaLinux 10 Pipeline)
 
-### 1. Persistent Storage Partition & Boot Alignment
-*   **SDA4 Target Architecture:** Discovered that specific Vagrant VirtualBox box templates dynamically target `/dev/sda4` as the underlying primary operating system root filesystem (`/`) during major package migration runs, while keeping `/boot` on `/dev/sda3`.
-*   **Pre-emptive Boot Device Redirection:** Implemented a targeted `sed` block filter step inside the playbook to anchor the active GRUB boot tracking parameter arrays (`/boot/grub2/grub.cfg` and `/etc/default/grub`) directly to `sda4`, neutralizing the low-level rescue/emergency mode loop loops on restart.
-*   **Dracut Hardware Module Injection:** Forcefully injected core VirtualBox storage controller driver modules (`ahci`, `ata_piix`) and block-aware management layers (`rootfs-block`) straight into the custom `99-lean-upgrade-size.conf` configuration profile. This guarantees the initramfs upgrade environment retains total physical sector visibility upon hardware reboots.
-
-### 2. Forensic Resolution of `adjust_local_repos` Linter Gate
-*   **The Symptom:** Leapp pre-upgrade or upgrade processes terminated abruptly during the `TargetTransactionCheck` execution phase with a fatal exit code reporting: `leapp.workflow.TargetTransactionCheck.adjust_local_repos: Missing required information to proceed!`.
-*   **The Root Cause:** High-efficiency playbook cleaning steps completely swept away the native repository definition tracks (`/etc/yum.repos.d/almalinux*.repo`) to prevent upgrade conflicts. However, Leapp's internal mapping actors require active local repository structures to run source-to-target schema matrix checks. Wiping the directory left an absolute metadata discovery void.
-*   **The Remediation:** Modified the staging process to force a native package re-installation (`dnf reinstall -y almalinux-release`) right after the purge blocks. This fully restores the clean version 9 base tracking maps, providing complete structural visibility to the linter before the upgrade pass initiates.
-
-### 3. Real-Time Telemetry and Automated Remediation
+### 1. Real-Time Telemetry and Automated Remediation
 *   **YAML Callback Enhancements:** Enforced `result_format = yaml` paired with `stdout_callback = default` inside `ansible.cfg` to discard messy horizontal JSON text blocks and stream pristine, scannable vertical reports.
 *   **Live Storage Monitoring:** Integrated pre-and-post cleanup checkpoints running `df -h` that automatically display storage allocation arrays directly in the terminal, proving an aggressive reclamation shield successfully swept away 1.0 GB of technical debt, stale caches, and unneeded dependencies.
 *   **Integrated Summary Matrix:** Embedded a custom Python script snippet into the workflow that extracts data from `/var/log/leapp/leapp-report.json` and prints a high-visibility status board directly onto the terminal dashboard, rendering critical inhibitors and risk layers black-on-white.

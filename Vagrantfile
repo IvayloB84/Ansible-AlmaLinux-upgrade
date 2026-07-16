@@ -7,31 +7,13 @@ Vagrant.configure("2") do |config|
   # GLOBAL CONFIGURATION & AUTOMATED TRIGGERS (Applies to ALL defined VMs)
   # =========================================================================
 
-  # 1. AUTOMATED BACKUP: Take a safety snapshot BEFORE any provisioning starts
   config.trigger.before :provision do |trigger|
     trigger.name = "Pre-Provision Safety Snapshot"
     trigger.info = "Backing up active VM state automatically before modification..."
-    
     trigger.ruby do |env, machine|
       vbox_uuid = machine.id.to_s
       puts "=== [GLOBAL BACKUP] Freezing baseline state for hardware UUID: #{vbox_uuid} ==="
-      
-      # FIX: Changed --force to --uniquename Force to match VirtualBox 7.2 syntax
       system("VBoxManage snapshot #{vbox_uuid} take auto_pre_upgrade_backup --uniquename Force")
-    end
-  end
-
-  # 2. AUTOMATED CLEANUP: Delete the snapshot AFTER provisioning completes
-  config.trigger.after :provision do |trigger|
-    trigger.name = "Post-Provision Cleanup"
-    trigger.info = "Provisioning complete. Clearing temporary safety layers..."
-    
-    trigger.ruby do |env, machine|
-      vbox_uuid = machine.id.to_s
-      puts "=== [GLOBAL CLEANUP] Clearing temporary safety snapshot for hardware UUID: #{vbox_uuid} ==="
-      
-      # Clean up the snapshot on the hardware layer automatically
-      system("VBoxManage snapshot #{vbox_uuid} delete auto_pre_upgrade_backup")
     end
   end
 
@@ -59,7 +41,7 @@ Vagrant.configure("2") do |config|
   SHELL
 
   # Global Python Setup Provisioning (Forces execution on every single boot phase)
-  # config.vm.provision "shell", inline: "sudo mount -t vboxsf vagrant /vagrant || true; bash /vagrant/scripts/custom_python312_installation.sh", run: "always"
+  config.vm.provision "shell", inline: "sudo mount -t vboxsf vagrant /vagrant || true; bash /vagrant/scripts/custom_python312_installation.sh", run: "always"
 
   # =========================================================================
   # INDIVIDUAL MACHINE DEFINITIONS
