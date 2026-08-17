@@ -209,6 +209,9 @@
         # =========================================================================
         - name: 14a Force Ansible to refresh system information
           ansible.builtin.setup:
+          vars:
+            ansible_python_interpreter: /usr/bin/python3
+          tags: validate
 
         - name: 14b. Validate that the system has successfully upgraded to major version 9
           ansible.builtin.assert:
@@ -217,3 +220,4 @@
               - ansible_distribution == "AlmaLinux"
             fail_msg: "Upgrade validation failed! System is reporting version {{ ansible_distribution_version }} instead of AlmaLinux 9."
             success_msg: "Success! Verified target machine is now actively running {{ ansible_distribution_version }}."
+            tags: version

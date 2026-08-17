@@ -49,24 +49,23 @@ Vagrant.configure("2") do |config|
 
   # --- VIRTUAL MACHINE: VM1 ---
   config.vm.define "vm1" do |vm1|
-    vm1.vm.box = "almalinux/8"
+    vm1.vm.box = "almalinux/9"
     vm1.vm.hostname = "vm1.do1.lab"
     vm1.vm.network "private_network", ip: "192.168.56.100"
     vm1.vm.network "forwarded_port", guest: 80, host: 8080, auto_correct: true
-  end 
 
-  # --- VIRTUAL MACHINE: VM2 ---
-  config.vm.define "vm2" do |vm2|
-    vm2.vm.box = "almalinux/8"
-    vm2.vm.hostname = "vm2.do1.lab"
-    vm2.vm.network "private_network", ip: "192.168.56.101"
-    vm2.vm.network "forwarded_port", guest: 80, host: 8081, auto_correct: true
-
-    # TARGETED ANSIBLE EXECUTION FOR VM2
-    vm2.vm.provision "ansible" do |ansible|
-      ansible.playbook = "playbook_RH_migration_8_9.yml"
-      ansible.raw_arguments = ["--flush-cache"]
-    end
-  end
-
+#  # --- VIRTUAL MACHINE: VM2 ---
+#  config.vm.define "vm2" do |vm2|
+#    vm2.vm.box = "almalinux/8"
+#    vm2.vm.hostname = "vm2.do1.lab"
+#    vm2.vm.network "private_network", ip: "192.168.56.101"
+#    vm2.vm.network "forwarded_port", guest: 80, host: 8081, auto_correct: true
+#
+#    # TARGETED ANSIBLE EXECUTION FOR VM2
+   vm1.vm.provision "ansible" do |ansible|
+     ansible.playbook = "playbook_RH_migration_9_10.yml"
+     ansible.raw_arguments = ["--flush-cache"]
+   end
+ end
+#
 end
